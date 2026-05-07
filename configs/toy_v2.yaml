@@ -1,0 +1,82 @@
+# CSER-JEPA-v2 Stage 0 toy gate config.
+# Action-essential α=1, ρ=0; mean-pooled prediction; LeWorldModel-style
+# (no EMA, no sg-on-target); Action-Spectral Path is the centerpiece.
+
+model:
+  freeze_encoder: true   # attempt D: frozen random-init ViT — diagnostic for
+                         # "does the spectral path work given a non-collapsing
+                         # encoder?". Random pos_embeds preserve position info.
+  encoder:
+    img_size: 32
+    patch_size: 4
+    in_chans: 3
+    embed_dim: 128
+    depth: 4
+    num_heads: 4
+    mlp_ratio: 4.0
+    dropout: 0.0
+  history:
+    depth: 4
+    num_heads: 4
+    max_context: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+  usual:
+    depth: 2
+  spectral:
+    d_spec: 64
+    n_modes: 8
+    gen_rank: 8
+    taylor_order: 4
+    alpha_hidden: 128
+  action_embedding:
+    d_a: 2
+    chunk_size: 1
+    net:
+      d_emb: 64
+      hidden: 128
+  fallback:
+    hidden: 64        # half-width relative to d (per addendum)
+  inverse_action:
+    hidden: 128
+    depth: 3
+
+trainer:
+  lambda_usual: 1.0
+  lambda_spec_res: 1.0
+  lambda_fallback_start: 0.01
+  lambda_fallback_end: 0.1
+  lambda_gen: 1.0e-4
+  lambda_inv_nll: 1.0
+  lambda_inv_mse: 5.0
+  lambda_idm_z: 5.0
+  lambda_nce: 0.0
+  lambda_reg: 1.0
+  nce_temperature: 1.0
+  nce_n_neg: 15
+  cleanup_start_frac: 0.5
+  total_steps: 2000
+
+data:
+  image_size: 32
+  in_chans: 3
+  state_dim: 2
+  action_dim: 2
+  context_len: 4
+  chunk_size: 1
+  blob_sigma: 4.0    # attempt E: σ 1.5 → 4.0. Larger blob fills more patches,
+                     # mean-pool retains position info. Tests whether toy-gate
+                     # failure is mean-pool-on-sparse-signal pathology.
+  action_scale: 0.25
+  alpha: 1.0
+  rho: 0.0
+  noise_std: 0.0
+
+optimizer:
+  lr: 5.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.01
+  clip_grad: 1.0
+
+batch:
+  size: 32

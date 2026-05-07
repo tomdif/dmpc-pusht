@@ -1,0 +1,61 @@
+# Stage T (T-large): bigger model on V's 2-way combined data.
+# 29M -> ~80M (embed_dim 384->512, depth 8->12). Tests whether the
+# capacity bottleneck V' surfaced is real, by giving the model 2.7x more
+# parameters to absorb the 98K-window combined dataset.
+
+model:
+  encoder:
+    img_size: 96
+    patch_size: 8
+    in_chans: 3
+    embed_dim: 512
+    depth: 12
+    num_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+  predictor:
+    n_layers: 12
+    num_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_context: 16
+  action:
+    d_a: 2
+    chunk_size: 8
+  idm_z:
+    hidden: 512
+    depth: 3
+
+trainer:
+  lambda_pred: 1.0
+  lambda_reward: 0.0
+  lambda_idm_z: 30.0     # bumped: bigger encoder needs stronger grounding pressure
+  lambda_reg: 1.0
+  total_steps: 12000
+
+data:
+  lerobot:
+    repo_id: lerobot/pusht_image
+    image_key: observation.image
+    action_key: action
+    reward_key: next.reward
+    context_len: 4
+    chunk_size: 8
+    normalize_actions: true
+  synthetic:
+    rollout_dir: /workspace/cser-jepa-v2/rollouts/self_play
+    context_len: 4
+    chunk_size: 8
+    normalize_actions: true
+
+optimizer:
+  lr: 2.0e-4               # slightly lower for the bigger model
+  betas: [0.9, 0.95]
+  weight_decay: 0.05
+  clip_grad: 1.0
+  amp: true
+  warmup_steps: 1000
+  min_lr_ratio: 0.1
+
+batch:
+  size: 48                 # batch 64->48 to fit memory comfortably

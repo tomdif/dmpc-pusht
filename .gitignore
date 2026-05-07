@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Outputs
+ckpts/
+rollouts/
+runs_*/
+goals/
+session_backup/
+*.pt
+*.safetensors
+*.ckpt
+*.h5
+
+# Logs
+*.log
+logs/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Large media
+*.mp4
+*.gif
+seed*_strip.png
