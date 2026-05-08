@@ -4,6 +4,8 @@ A diffusion-policy + JEPA-world-model + adaptive-K-shot inference pipeline that 
 
 This is **+15pp above the prior published SOTA** ([BID](https://arxiv.org/abs/2408.17355), 85% at canonical eval) and **+34.6pp above the LeRobot DP baseline**, all at the directly-comparable canonical protocol with no extended-budget allowances.
 
+**📄 Full paper draft: [PAPER.md](PAPER.md)** — method details, ablations, related work, honest caveats, and reproducibility checklist.
+
 ## Headline results
 
 | System | n | success | 95% CI | protocol |
