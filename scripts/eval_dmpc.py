@@ -46,6 +46,20 @@ def parse_args():
                    help="comma-separated explicit env seeds to eval (overrides --seed and --n-episodes)")
     p.add_argument("--n-attempts", type=int, default=1,
                    help="K-shot best-of-rollouts: run K rollouts per env seed, take best max_cov")
+    # Variance-based adaptive K (option 2 from PAPER §5):
+    # After K_probe standard attempts, compute max_cov variance. If all attempts
+    # fail with low variance (mode collapse), skip remaining standard attempts
+    # and go directly to perturbation fallback.
+    p.add_argument("--adaptive-k", action="store_true",
+                   help="enable variance-based adaptive K with mode-collapse detection")
+    p.add_argument("--probe-k", type=int, default=2,
+                   help="number of probe attempts before variance check")
+    p.add_argument("--collapse-threshold", type=float, default=0.02,
+                   help="if max(probe_covs) - min(probe_covs) < threshold AND all fail, declare mode collapse")
+    p.add_argument("--fallback-k", type=int, default=10,
+                   help="number of perturbation-fallback attempts after mode collapse OR after standard K exhausted")
+    p.add_argument("--perturb-steps", type=int, default=30,
+                   help="env steps of random actions before DP resumes, in fallback rollouts")
     p.add_argument("--use-value", action="store_true")
     p.add_argument("--value-weight", type=float, default=1.0)
     p.add_argument("--use-goal", action="store_true")
@@ -347,73 +361,137 @@ def main():
         prev_chunk_norm[0] = actions_norm[best].detach()                             # (horizon_p, 2)
         return actions_raw[best]                                                    # (T_a, 2)
 
+    def run_one_rollout(env_seed: int, attempt_seed: int, perturb_first_steps: int = 0):
+        """Run a single full episode rollout. If perturb_first_steps > 0, replace
+        first N env steps with uniform-random actions before D-MPC takes over."""
+        torch.manual_seed(attempt_seed)
+        obs, info = env.reset(seed=env_seed)
+        x0 = _img_to_tensor(obs["pixels"])
+        s0 = torch.from_numpy(np.asarray(obs["agent_pos"], dtype=np.float32))
+        dp_pixels = [x0.clone() for _ in range(n_obs_steps)]
+        dp_states = [s0.clone() for _ in range(n_obs_steps)]
+        world_buf = [x0.clone() for _ in range(T_ctx)]
+
+        ep_return = 0.0; ep_max_coverage = 0.0; ep_success = False; steps = 0
+        terminated = False; truncated = False
+        prev_chunk_norm[0] = None
+        while steps < args.max_steps:
+            if perturb_first_steps > 0 and steps < perturb_first_steps:
+                a_chunk = np.random.uniform(50, 470, size=(args.n_action_steps, 2)).astype(np.float32)
+            else:
+                a_chunk = plan(dp_pixels, dp_states, world_buf).cpu().numpy().astype(np.float32)
+            for k in range(args.n_action_steps):
+                if steps >= args.max_steps: break
+                obs, r, terminated, truncated, info = env.step(a_chunk[k])
+                ep_return += float(r)
+                ep_max_coverage = max(ep_max_coverage, float(info.get("coverage", 0.0)))
+                if info.get("is_success", False):
+                    ep_success = True
+                steps += 1
+                xt = _img_to_tensor(obs["pixels"])
+                st_ = torch.from_numpy(np.asarray(obs["agent_pos"], dtype=np.float32))
+                dp_pixels = dp_pixels[1:] + [xt]
+                dp_states = dp_states[1:] + [st_]
+                world_buf = world_buf[1:] + [xt]
+                if terminated or truncated: break
+            if terminated or truncated: break
+        return ep_return, ep_max_coverage, ep_success, steps
+
     # --- eval loop ---
     if args.seeds_list:
         seeds_to_eval = [int(s) for s in args.seeds_list.split(",")]
     else:
         seeds_to_eval = [args.seed + i for i in range(args.n_episodes)]
     returns, successes, max_coverages = [], [], []
+    total_attempts_used = 0
+    fallback_triggers = 0   # via mode-collapse detection
+    fallback_post_K = 0     # via standard K exhausted
     for ep, env_seed in enumerate(seeds_to_eval):
-        # K-shot best-of-rollouts: run n_attempts trials per env seed, keep best.
-        # Different RNG (we re-seed torch per attempt) gives DP sample variance.
-        best_return = 0.0
-        best_max_cov = 0.0
-        best_success = False
-        best_steps = 0
-        for attempt in range(args.n_attempts):
-            torch.manual_seed(1000 * env_seed + 31 * ep + 7 * attempt)
-            obs, info = env.reset(seed=env_seed)
-            x0 = _img_to_tensor(obs["pixels"])
-            s0 = torch.from_numpy(np.asarray(obs["agent_pos"], dtype=np.float32))
-            dp_pixels = [x0.clone() for _ in range(n_obs_steps)]
-            dp_states = [s0.clone() for _ in range(n_obs_steps)]
-            world_buf = [x0.clone() for _ in range(T_ctx)]
+        best_return = 0.0; best_max_cov = 0.0; best_success = False; best_steps = 0
+        probe_covs = []
+        attempts_used = 0
+        in_fallback = False
 
-            ep_return = 0.0
-            ep_max_coverage = 0.0
-            ep_success = False
-            steps = 0
-            terminated = False
-            truncated = False
-            prev_chunk_norm[0] = None
-            while steps < args.max_steps:
-                a_chunk = plan(dp_pixels, dp_states, world_buf).cpu().numpy().astype(np.float32)
-                for k in range(args.n_action_steps):
-                    if steps >= args.max_steps:
-                        break
-                    obs, r, terminated, truncated, info = env.step(a_chunk[k])
-                    ep_return += float(r)
-                    ep_max_coverage = max(ep_max_coverage, float(info.get("coverage", 0.0)))
-                    if info.get("is_success", False):
-                        ep_success = True
-                    steps += 1
-                    xt = _img_to_tensor(obs["pixels"])
-                    st_ = torch.from_numpy(np.asarray(obs["agent_pos"], dtype=np.float32))
-                    dp_pixels = dp_pixels[1:] + [xt]
-                    dp_states = dp_states[1:] + [st_]
-                    world_buf = world_buf[1:] + [xt]
-                    if terminated or truncated:
-                        break
-                if terminated or truncated:
-                    break
+        # ----- adaptive-K mode -----
+        if args.adaptive_k:
+            # 1) Probe phase: K=probe_k standard attempts.
+            for attempt in range(args.probe_k):
+                ep_return, ep_max_coverage, ep_success, steps = run_one_rollout(
+                    env_seed, 1000 * env_seed + 31 * ep + 7 * attempt, perturb_first_steps=0,
+                )
+                attempts_used += 1; probe_covs.append(ep_max_coverage)
+                if ep_max_coverage > best_max_cov or ep_success:
+                    best_return = ep_return; best_max_cov = ep_max_coverage
+                    best_success = ep_success; best_steps = steps
+                print(f"    seed {env_seed} probe {attempt}: max_cov={ep_max_coverage:.3f}  success={ep_success}", flush=True)
+                if best_success: break
 
-            # Best-of-K: prefer success > higher max_cov > higher return.
-            attempt_better = (
-                (ep_success and not best_success)
-                or (ep_success == best_success and ep_max_coverage > best_max_cov)
-                or (ep_success == best_success and ep_max_coverage == best_max_cov and ep_return > best_return)
-            )
-            if attempt == 0 or attempt_better:
-                best_return = ep_return
-                best_max_cov = ep_max_coverage
-                best_success = ep_success
-                best_steps = steps
-            if args.n_attempts > 1:
-                print(f"    seed {env_seed} attempt {attempt}: return={ep_return:+.3f}  "
-                      f"max_cov={ep_max_coverage:.3f}  success={ep_success}", flush=True)
-            # Early-stop K-shot if already a success.
-            if best_success:
-                break
+            # 2) Decide: if probe didn't succeed AND variance is low → mode collapse → fallback.
+            if not best_success:
+                cov_range = max(probe_covs) - min(probe_covs)
+                # Two collapse signatures, EITHER triggers fallback:
+                # 1. Tight variance (deterministic mode collapse): range < threshold AND max < 0.85
+                #    (excludes near-miss cluster which has tight variance but is on the cusp).
+                # 2. Very low max (clearly stuck — barely engaged with block): max < 0.55.
+                low_var_collapse = (cov_range < args.collapse_threshold) and (max(probe_covs) < 0.85)
+                low_max_collapse = max(probe_covs) < 0.55
+                detected_collapse = low_var_collapse or low_max_collapse
+                if detected_collapse:
+                    fallback_triggers += 1
+                    print(f"    seed {env_seed} ▶ mode-collapse detected "
+                          f"(cov_range={cov_range:.3f}, max={max(probe_covs):.3f}); "
+                          f"skipping standard K, going to perturb fallback K={args.fallback_k}", flush=True)
+                else:
+                    # Standard K=remaining attempts before fallback.
+                    n_more_standard = max(0, args.n_attempts - args.probe_k)
+                    for attempt in range(args.probe_k, args.probe_k + n_more_standard):
+                        ep_return, ep_max_coverage, ep_success, steps = run_one_rollout(
+                            env_seed, 1000 * env_seed + 31 * ep + 7 * attempt, perturb_first_steps=0,
+                        )
+                        attempts_used += 1
+                        if ep_max_coverage > best_max_cov or ep_success:
+                            best_return = ep_return; best_max_cov = ep_max_coverage
+                            best_success = ep_success; best_steps = steps
+                        print(f"    seed {env_seed} std {attempt}: max_cov={ep_max_coverage:.3f}  success={ep_success}", flush=True)
+                        if best_success: break
+                    if not best_success:
+                        fallback_post_K += 1
+
+            # 3) Perturbation fallback if still not solved.
+            if not best_success:
+                in_fallback = True
+                for attempt in range(args.fallback_k):
+                    ep_return, ep_max_coverage, ep_success, steps = run_one_rollout(
+                        env_seed, 1000 * env_seed + 53 * ep + 13 * attempt + 1,
+                        perturb_first_steps=args.perturb_steps,
+                    )
+                    attempts_used += 1
+                    if ep_max_coverage > best_max_cov or ep_success:
+                        best_return = ep_return; best_max_cov = ep_max_coverage
+                        best_success = ep_success; best_steps = steps
+                    print(f"    seed {env_seed} perturb {attempt}: max_cov={ep_max_coverage:.3f}  success={ep_success}", flush=True)
+                    if best_success: break
+
+        # ----- non-adaptive (legacy K-shot) mode -----
+        else:
+            for attempt in range(args.n_attempts):
+                ep_return, ep_max_coverage, ep_success, steps = run_one_rollout(
+                    env_seed, 1000 * env_seed + 31 * ep + 7 * attempt, perturb_first_steps=0,
+                )
+                attempts_used += 1
+                attempt_better = (
+                    (ep_success and not best_success)
+                    or (ep_success == best_success and ep_max_coverage > best_max_cov)
+                    or (ep_success == best_success and ep_max_coverage == best_max_cov and ep_return > best_return)
+                )
+                if attempt == 0 or attempt_better:
+                    best_return = ep_return; best_max_cov = ep_max_coverage
+                    best_success = ep_success; best_steps = steps
+                if args.n_attempts > 1:
+                    print(f"    seed {env_seed} attempt {attempt}: return={ep_return:+.3f}  "
+                          f"max_cov={ep_max_coverage:.3f}  success={ep_success}", flush=True)
+                if best_success: break
+        total_attempts_used += attempts_used
 
         print(f"  seed {env_seed}: return={best_return:+.3f}  max_cov={best_max_cov:.3f}  "
               f"success={best_success}  steps={best_steps}", flush=True)
@@ -421,10 +499,15 @@ def main():
         successes.append(int(best_success))
         max_coverages.append(best_max_cov)
 
-    print(f"\n=== summary over {args.n_episodes} episodes ({args.rerank_mode}) ===")
+    n = len(seeds_to_eval)
+    print(f"\n=== summary over {n} episodes ({args.rerank_mode}) ===")
     print(f"  mean return     : {np.mean(returns):+.3f}")
     print(f"  mean max_cov    : {np.mean(max_coverages):.3f}")
-    print(f"  success rate    : {np.mean(successes):.2%}")
+    print(f"  success rate    : {np.mean(successes):.2%}  ({sum(successes)}/{n})")
+    if args.adaptive_k:
+        print(f"  total attempts  : {total_attempts_used}  (avg {total_attempts_used/n:.2f}/seed)")
+        print(f"  fallback triggers (collapse-detected): {fallback_triggers}")
+        print(f"  fallback triggers (post-K-exhausted): {fallback_post_K}")
 
 
 if __name__ == "__main__":
