@@ -245,9 +245,17 @@ We disclose all known limitations of this work.
 
 Our 173M-parameter JEPA world model and our discriminator are trained on PushT-specific data. Transfer to a new manipulation benchmark requires re-collection of ≈ 1,500 evaluation rollouts and re-training of the world model and discriminator (estimated 1-2 days per task on 6× B200 GPUs). The trained components are not zero-shot transferable.
 
-### 7.2 Adaptive K-shot is not single-shot
+### 7.2 Adaptive K-shot is not single-shot — and uses a different scaling axis than BID
 
-Our 100% headline uses adaptive K-shot inference compute, with up to K_fallback=20 additional attempts on the hardest seeds. This is a legitimate inference-time-scaling protocol, well-precedented in the diffusion (Singhal et al., 2025; Ma et al., 2025) and language-model (OpenAI, 2024) literature, but it is not directly comparable to single-shot evaluation. A reader interested in matched-compute single-shot comparisons should focus on the K=1 D-MPC result (74% on n=50), which is +8.6pp above the LeRobot baseline.
+Our 100% headline uses **rollout-level** adaptive K-shot inference compute: each evaluation seed may be retried up to K_fallback=20 times with different DDPM RNGs and (for the fallback rollouts) different initial state perturbations. This is a legitimate inference-time-scaling protocol, well-precedented in the language-model literature (OpenAI, 2024) and increasingly common in diffusion (Singhal et al., 2025; Ma et al., 2025), but it is **rollout-scaling**, not the **action-sample scaling per decision step** that DP, BID, and most prior manipulation literature use.
+
+Concretely:
+- **DP, BID, FK-steering**: single rollout per evaluation seed, N=30-64 action samples per plan call (BID uses N=30, FK uses M=64 particles).
+- **Our work**: up to K=25 rollouts per evaluation seed, N=64 action samples per plan call within each rollout.
+
+The two axes scale orthogonally and are both legitimate but should not be conflated. A reader interested in matched-compute single-shot comparisons (rollout-level K=1, action-sample N=64) should focus on the **D-MPC + K=5 + discriminator at 92.20%** result (which uses K=5 average ≈ 1.5× rollout-budget over single-shot, and beats BID by +7.2pp), or the **D-MPC + K=1 baseline at 74% (n=50)**, which uses identical rollout-budget to BID and is +8.6pp above the LeRobot baseline.
+
+Our **100% headline at K=20 fallback should be reported alongside its compute multiplier**: ≈ 2.5× BID's rollout-budget on average across n=500, ≈ 25× on the hardest 1% of seeds. We report this transparently in Section 5.6.
 
 ### 7.3 Simulation-only evaluation
 
