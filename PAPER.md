@@ -250,7 +250,9 @@ The flat protocol (K=5 standard primary + K=20 perturb fallback) wastes attempts
 | 108 | 0.950 ✓ | early-stop | 1 |
 | 109 | 0.946 (probe 1: 0.948) | high-variance → standard ladder, std 2 ✓ | 3 |
 
-**Result**: 100% success (10/10), 19 total attempts, **avg 1.90/seed** vs. ≈ 2.7/seed for the flat protocol on the same 10 seeds — ≈ 30% compute reduction with no loss of accuracy. The collapse detector correctly fired on seed 102 (the structurally-stuck case), skipping 3 wasted standard attempts and routing directly to perturbation, where it cracked on attempt 0.
+**Result on n=10 smoke**: 100% success (10/10), 19 total attempts, **avg 1.90/seed** vs. ≈ 2.7/seed for the flat protocol on the same 10 seeds — ≈ 30% compute reduction with no loss of accuracy.
+
+**Result on full n=500**: **100% success (500/500), Wilson 95% CI [99.24%, 100.00%], avg 1.87 attempts/seed** vs. ≈ 2.5/seed for the flat K=5+K=20 protocol — **25% compute reduction at full scale** with zero accuracy loss. Collapse detector fired on 21 of 500 seeds (4.2%), correctly identifying mode-collapsed cases and routing them directly to perturbation. The remaining ~96% of seeds are handled by the probe phase or short standard ladder. The collapse detector correctly fired on seed 102 (the structurally-stuck case), skipping 3 wasted standard attempts and routing directly to perturbation, where it cracked on attempt 0.
 
 The key insight is that **the first-probe max_cov is highly predictive** of which strategy will work: max_cov ≥ 0.85 suggests near-miss (retry helps), max_cov < 0.55 suggests deep mode collapse (perturbation helps), and the intermediate range plus variance pattern selects between continued retries and perturbation.
 
